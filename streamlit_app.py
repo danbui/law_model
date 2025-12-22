@@ -36,17 +36,28 @@ def load_sparse_model():
 
 @st.cache_resource
 def get_qdrant_client():
-    client = QdrantClient(path=QDRANT_PATH)
-    # Ensure Index Exists (safe to call repeatedly)
     try:
-        client.create_payload_index(
-            collection_name=COLLECTION_NAME,
-            field_name="article",
-            field_schema="text"
-        )
-    except Exception:
-        pass # Ignore if already exists or other minor issues
-    return client
+        client = QdrantClient(path=QDRANT_PATH)
+        # Ensure Index Exists (safe to call repeatedly)
+        try:
+            client.create_payload_index(
+                collection_name=COLLECTION_NAME,
+                field_name="article",
+                field_schema="text"
+            )
+        except Exception:
+            pass # Ignore if already exists or other minor issues
+        return client
+    except Exception as e:
+        if "already accessed" in str(e):
+            st.error(
+                "⚠️ **Lỗi kết nối bộ nhớ (Database Locked)**\n\n"
+                "Qdrant Local đang bị khóa bởi một tiến trình khác (có thể do app đang khởi động lại hoặc có nhiều tab mở).\n\n"
+                "👉 **Giải pháp**: Hãy vào **Manage App** (góc dưới phải) -> chọn **Reboot App** để khởi động lại sạch sẽ."
+            )
+            st.stop()
+        else:
+            raise e
 
 # -------------------------
 # UI LAYOUT
