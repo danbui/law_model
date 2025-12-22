@@ -5,6 +5,7 @@ import pickle
 from pyvi import ViTokenizer
 from sklearn.feature_extraction.text import TfidfVectorizer # Required for pickle
 import numpy as np
+import re
 
 # -------------------------
 # CONFIG
@@ -35,7 +36,17 @@ def load_sparse_model():
 
 @st.cache_resource
 def get_qdrant_client():
-    return QdrantClient(path=QDRANT_PATH)
+    client = QdrantClient(path=QDRANT_PATH)
+    # Ensure Index Exists (safe to call repeatedly)
+    try:
+        client.create_payload_index(
+            collection_name=COLLECTION_NAME,
+            field_name="article",
+            field_schema="text"
+        )
+    except Exception:
+        pass # Ignore if already exists or other minor issues
+    return client
 
 # -------------------------
 # UI LAYOUT
@@ -85,6 +96,24 @@ if prompt := st.chat_input("Nhập câu hỏi của bạn ở đây..."):
     # Search logic
     try:
         # -------------------------
+        # METADATA EXTRACTION (FILTERING)
+        # -------------------------
+        article_match = re.search(r"(?:điều|đ)\s*(\d+)", prompt, re.IGNORECASE)
+        qdrant_filter = None
+
+        if article_match:
+            article_num = article_match.group(1)
+            # Apply Filter
+            qdrant_filter = models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="article",
+                        match=models.MatchText(text=f"Điều {article_num}")
+                    )
+                ]
+            )
+
+        # -------------------------
         # HYBRID EMBEDDING
         # -------------------------
         # 1. Dense
@@ -104,11 +133,13 @@ if prompt := st.chat_input("Nhập câu hỏi của bạn ở đây..."):
                 models.Prefetch(
                     query=models.SparseVector(indices=indices, values=values),
                     using="sparse",
+                    filter=qdrant_filter, # Filter applied
                     limit=top_k * 2,
                 ),
                 models.Prefetch(
                     query=query_dense,
                     using="dense",
+                    filter=qdrant_filter, # Filter applied
                     limit=top_k * 2,
                 ),
             ],
@@ -121,18 +152,21 @@ if prompt := st.chat_input("Nhập câu hỏi của bạn ở đây..."):
         # -------------------------
         if not results.points:
             response_content = "Không tìm thấy kết quả phù hợp."
+            if article_match:
+                response_content += f" (Đã lọc theo Điều {article_num})"
         else:
-            response_content = f"**Tìm thấy {len(results.points)} kết quả (Hybrid RRF):**\n\n"
+            response_content = f"**Tìm thấy {len(results.points)} kết quả:**\n\n"
+            if article_match:
+                 response_content += f"*(Đã lọc kết quả thuộc Điều {article_num})*\n\n"
+
             for idx, point in enumerate(results.points, 1):
                 payload = point.payload
-                score = point.score # RRF score is not cosine similarity, it's rank based reciprocal sum
                 
                 article = payload.get('article', 'N/A')
                 clause = payload.get('clause', 'N/A')
                 content = payload.get("text", "N/A")
                 
-                response_content += f"### {idx}. Điều {article}, Khoản {clause}\n" # Removed "Score" as RRF scores are confusing (e.g. 1.0, 0.5)
-                # response_content += f"*(Score: {score:.4f})*\n" 
+                response_content += f"### {idx}. Điều {article}, Khoản {clause}\n"
                 response_content += f"> {content}\n\n"
                 response_content += "---\n"
 

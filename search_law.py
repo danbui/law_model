@@ -5,6 +5,7 @@ from pyvi import ViTokenizer
 from sklearn.feature_extraction.text import TfidfVectorizer # Required to unpickle
 import numpy as np
 import sys
+import re
 
 # Force UTF-8 for Windows Console
 try:
@@ -51,6 +52,15 @@ except FileNotFoundError:
 client = QdrantClient(
     path=QDRANT_PATH
 )
+
+# Ensure Payload Index exists for 'article' used in filtering
+# This is safe to run multiple times
+client.create_payload_index(
+    collection_name=COLLECTION_NAME,
+    field_name="article",
+    field_schema="text"
+)
+
 print("Connected to Qdrant.")
 print("Type Vietnamese query. Type 'exit' to quit.\n")
 
@@ -69,9 +79,35 @@ try:
             break
 
         # -------------------------
+        # METADATA EXTRACTION (FILTERING)
+        # -------------------------
+        # Pattern match "Điều 10", "điều 10", "Đ 10"
+        article_match = re.search(r"(?:điều|đ)\s*(\d+)", query, re.IGNORECASE)
+        qdrant_filter = None
+
+        if article_match:
+            article_num = article_match.group(1)
+            # Create a textual match filter. 
+            # "Điều 10" in the article string will match "10" token if stemmed/tokenized correctly.
+            # Qdrant "text" index on "Điều 10. Title" -> tokens: "điều", "10", "title"
+            # Searching for "10" matches "Điều 10", but NOT "Điều 100" (usually, unless prefix match).
+            # "MatchText" matches individual tokens.
+            
+            print(f"   [INFO] Filtering by Article: {article_num}")
+            
+            # Use strict token match for the number "10" in the "article" field
+            qdrant_filter = models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="article",
+                        match=models.MatchText(text=f"Điều {article_num}")
+                    )
+                ]
+            )
+
+        # -------------------------
         # EMBED QUERY (DENSE)
         # -------------------------
-        # encode returns numpy array by default
         dense_vector = dense_model.encode(
             query,
             normalize_embeddings=True
@@ -81,27 +117,25 @@ try:
         # EMBED QUERY (SPARSE)
         # -------------------------
         sparse_vec_data = sparse_model.transform([query])
-        # Extract indices and values from the single row sparse matrix
         indices = sparse_vec_data.indices.tolist()
         values = sparse_vec_data.data.tolist()
 
         # -------------------------
         # HYBRID SEARCH (RRF)
         # -------------------------
-        # Using Qdrant's Query Fusion (available in newer versions)
-        # We prefetch candidates from both Dense and Sparse, then Fuse.
-        
         results = client.query_points(
             collection_name=COLLECTION_NAME,
             prefetch=[
                 models.Prefetch(
                     query=models.SparseVector(indices=indices, values=values),
                     using="sparse",
-                    limit=TOP_K * 2, # Fetch more candidates for fusion
+                    filter=qdrant_filter, # Apply filter here
+                    limit=TOP_K * 2,
                 ),
                 models.Prefetch(
                     query=dense_vector,
                     using="dense",
+                    filter=qdrant_filter, # Apply filter here
                     limit=TOP_K * 2,
                 ),
             ],
@@ -121,7 +155,6 @@ try:
         for idx, point in enumerate(results.points, 1):
             payload = point.payload
             
-            # Score logic: RRF scoring is different (rank based).
             print(f"Result {idx}")
             print(f"Score   : {point.score:.4f}") 
             print(f"Doc ID  : {payload.get('doc_id')}")
@@ -135,7 +168,6 @@ try:
                 
             print("Text snippet:")
             text = payload.get("text", "")
-            # Truncate for display if too long
             print(text[:200] + "..." if len(text) > 200 else text)
             print("-" * 80)
 
