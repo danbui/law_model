@@ -151,20 +151,37 @@ for docx_file in LAW_DIR.glob("*.docx"):
     raw_text = load_docx_text(docx_file)
     chunks = chunk_vietnamese_law(raw_text, doc_id)
     all_chunks.extend(chunks)
-    print(f"✅ {doc_id}: {len(chunks)} chunks")
+    print(f"DONE {doc_id}: {len(chunks)} chunks")
 
-print(f"📦 Total chunks: {len(all_chunks)}")
+
+
+print(f"Total chunks: {len(all_chunks)}")
 
 
 # ==========================================================
-# 6. EMBEDDING MODEL
+# 6. QDRANT SETUP (MOVED UP FOR FAIL-FAST)
 # ==========================================================
+print("Connecting to Qdrant...")
+try:
+    client = QdrantClient(path="./qdrant_db")
+    # Test connection/lock
+    client.get_collections()
+except Exception as e:
+    print(f"\n[ERROR] Could not connect to Qdrant DB: {e}")
+    print("Please stop any running Streamlit app or other python scripts using the DB.")
+    exit(1)
+
+# ==========================================================
+# 7. EMBEDDING MODEL
+# ==========================================================
+print("Loading Embedding Model...")
 model = SentenceTransformer(
     "bkai-foundation-models/vietnamese-bi-encoder"
 )
 
 texts = [c["text"] for c in all_chunks]
 
+print(f"Embedding {len(texts)} chunks...")
 embeddings = model.encode(
     texts,
     normalize_embeddings=True,
@@ -174,14 +191,10 @@ embeddings = model.encode(
 
 dim = embeddings.shape[1]
 
-
 # ==========================================================
-# 7. QDRANT SETUP
+# 8. RECREATE COLLECTION & STORE
 # ==========================================================
-client = QdrantClient(
-    url="http://localhost:6333"
-)
-
+print("Recreating collection...")
 client.recreate_collection(
     collection_name="vn_law",
     vectors_config=VectorParams(
@@ -190,10 +203,6 @@ client.recreate_collection(
     )
 )
 
-
-# ==========================================================
-# 8. STORE INTO QDRANT
-# ==========================================================
 points = []
 
 for idx, chunk in enumerate(all_chunks):
@@ -213,13 +222,15 @@ for idx, chunk in enumerate(all_chunks):
 
 BATCH_SIZE = 64  # or 100, safe on Windows
 
+print("Upserting to Qdrant...")
 for i in range(0, len(points), BATCH_SIZE):
     batch = points[i:i + BATCH_SIZE]
     client.upsert(
         collection_name="vn_law",
         points=batch
     )
-    print(f"✅ Inserted {i + len(batch)} / {len(points)}")
+    print(f"Inserted {i + len(batch)} / {len(points)}")
 
 
-print(f"🚀 Stored {len(points)} chunks into Qdrant (vn_law)")
+print(f"Stored {len(points)} chunks into Qdrant (vn_law)")
+

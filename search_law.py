@@ -4,8 +4,9 @@ from qdrant_client import QdrantClient
 # -------------------------
 # CONFIG
 # -------------------------
-QDRANT_HOST = "localhost"
-QDRANT_PORT = 6333
+# QDRANT_HOST = "localhost"
+# QDRANT_PORT = 6333
+QDRANT_PATH = "./qdrant_db"
 COLLECTION_NAME = "vn_law"
 TOP_K = 5
 
@@ -22,8 +23,7 @@ print("Model loaded.\n")
 # CONNECT TO QDRANT
 # -------------------------
 client = QdrantClient(
-    host=QDRANT_HOST,
-    port=QDRANT_PORT
+    path=QDRANT_PATH
 )
 
 print("Connected to Qdrant.")

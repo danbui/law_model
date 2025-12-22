@@ -1,20 +1,7 @@
-# Python
+
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
-.venv/
-venv/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Env
+*.lock
+qdrant_db/.lock
 .env
-
-# Data
-data/laws/*.docx
-
-# HuggingFace cache (optional)
-~/.cache/huggingface/
+.venv
