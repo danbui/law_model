@@ -4,10 +4,13 @@
 from pathlib import Path
 from docx import Document
 import re
+import pickle
+import numpy as np
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
-from qdrant_client.models import PointStruct, VectorParams, Distance
-
+from qdrant_client.models import PointStruct, VectorParams, SparseVectorParams, Distance, SparseIndexParams
+from pyvi import ViTokenizer
+from sklearn.feature_extraction.text import TfidfVectorizer
 
 # ==========================================================
 # 2. REGEX PATTERNS (Vietnamese Law Structure)
@@ -141,11 +144,18 @@ def chunk_vietnamese_law(text: str, doc_id: str):
 
 
 # ==========================================================
-# 5. LOAD & CHUNK ALL DOCX FILES
+# 5. TOKENIZER HELPER
+# ==========================================================
+def vi_tokenizer(text):
+    return ViTokenizer.tokenize(text).split()
+
+# ==========================================================
+# 6. LOAD & CHUNK ALL DOCX FILES
 # ==========================================================
 LAW_DIR = Path(__file__).parent / "lawdata"
 all_chunks = []
 
+print("Loading documents...")
 for docx_file in LAW_DIR.glob("*.docx"):
     doc_id = docx_file.stem
     raw_text = load_docx_text(docx_file)
@@ -153,18 +163,18 @@ for docx_file in LAW_DIR.glob("*.docx"):
     all_chunks.extend(chunks)
     print(f"DONE {doc_id}: {len(chunks)} chunks")
 
-
-
 print(f"Total chunks: {len(all_chunks)}")
-
+if not all_chunks:
+    print("No chunks found. Exiting.")
+    exit(0)
 
 # ==========================================================
-# 6. QDRANT SETUP (MOVED UP FOR FAIL-FAST)
+# 7. QDRANT SETUP
 # ==========================================================
 print("Connecting to Qdrant...")
 try:
     client = QdrantClient(path="./qdrant_db")
-    # Test connection/lock
+    # Test connection
     client.get_collections()
 except Exception as e:
     print(f"\n[ERROR] Could not connect to Qdrant DB: {e}")
@@ -172,47 +182,95 @@ except Exception as e:
     exit(1)
 
 # ==========================================================
-# 7. EMBEDDING MODEL
+# 8. DENSE EMBEDDINGS (SentenceTransformer)
 # ==========================================================
-print("Loading Embedding Model...")
-model = SentenceTransformer(
-    "bkai-foundation-models/vietnamese-bi-encoder"
-)
+print("Loading Dense Model (bkai-foundation-models/vietnamese-bi-encoder)...")
+dense_model = SentenceTransformer("bkai-foundation-models/vietnamese-bi-encoder")
 
 texts = [c["text"] for c in all_chunks]
 
-print(f"Embedding {len(texts)} chunks...")
-embeddings = model.encode(
+print(f"Generating dense embeddings for {len(texts)} chunks...")
+dense_embeddings = dense_model.encode(
     texts,
     normalize_embeddings=True,
     batch_size=32,
     show_progress_bar=True
 )
-
-dim = embeddings.shape[1]
+dense_dim = dense_embeddings.shape[1]
 
 # ==========================================================
-# 8. RECREATE COLLECTION & STORE
+# 9. SPARSE EMBEDDINGS (TF-IDF / BM25 Approximation)
 # ==========================================================
-print("Recreating collection...")
+print("Training Sparse Model (TF-IDF with pyvi)...")
+
+# We use TfidfVectorizer with our custom tokenizer
+# min_df can be adjusted. 
+sparse_model = TfidfVectorizer(
+    tokenizer=vi_tokenizer, 
+    token_pattern=None, # Use tokenizer only
+    lowercase=True,
+    min_df=1  # Include all terms for now
+)
+
+sparse_matrix = sparse_model.fit_transform(texts)
+print(f"Sparse vocabulary size: {len(sparse_model.vocabulary_)}")
+
+# Save the sparse model (TF-IDF Vectorizer) for query processing
+with open("tfidf_model.pkl", "wb") as f:
+    pickle.dump(sparse_model, f)
+print("Saved sparse model to 'tfidf_model.pkl'")
+
+# ==========================================================
+# 10. RECREATE COLLECTION & UPLOAD
+# ==========================================================
+print("Recreating Qdrant collection...")
 client.recreate_collection(
     collection_name="vn_law",
-    vectors_config=VectorParams(
-        size=dim,
-        distance=Distance.COSINE
-    )
+    vectors_config={
+        "dense": VectorParams(
+            size=dense_dim,
+            distance=Distance.COSINE
+        )
+    },
+    sparse_vectors_config={
+        "sparse": SparseVectorParams(
+            index=SparseIndexParams(
+                on_disk=False,
+            )
+        )
+    }
 )
 
 points = []
+print("Preparing points...")
 
+# Convert sparse matrix to list of dicts/indices
+# sparse_matrix is CSR. We can iterate rows.
 for idx, chunk in enumerate(all_chunks):
     payload = chunk.copy()
     text = payload.pop("text")
+    
+    # Dense Vector
+    dense_vec = dense_embeddings[idx].tolist()
+    
+    # Sparse Vector
+    # Get row slice
+    # To get indices and data specific to this row efficiently:
+    row_start = sparse_matrix.indptr[idx]
+    row_end = sparse_matrix.indptr[idx+1]
+    indices = sparse_matrix.indices[row_start:row_end].tolist()
+    values = sparse_matrix.data[row_start:row_end].tolist()
 
     points.append(
         PointStruct(
             id=idx,
-            vector=embeddings[idx].tolist(),
+            vector={
+                "dense": dense_vec,
+                "sparse": {
+                    "indices": indices,
+                    "values": values
+                }
+            },
             payload={
                 **payload,
                 "text": text
@@ -220,9 +278,8 @@ for idx, chunk in enumerate(all_chunks):
         )
     )
 
-BATCH_SIZE = 64  # or 100, safe on Windows
-
-print("Upserting to Qdrant...")
+BATCH_SIZE = 64
+print("Upserting to Qdrant (Hybrid)...")
 for i in range(0, len(points), BATCH_SIZE):
     batch = points[i:i + BATCH_SIZE]
     client.upsert(
@@ -231,6 +288,4 @@ for i in range(0, len(points), BATCH_SIZE):
     )
     print(f"Inserted {i + len(batch)} / {len(points)}")
 
-
-print(f"Stored {len(points)} chunks into Qdrant (vn_law)")
-
+print(f"Success! {len(points)} chunks indexed.")
