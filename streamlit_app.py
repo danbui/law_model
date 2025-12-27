@@ -2,6 +2,14 @@
 import streamlit as st
 
 from retrieval import load_resources, hybrid_search, parse_filter_hints
+from pyvi import ViTokenizer
+
+# ==========================================================
+# TOKENIZER HELPER (Needed for pickle.load of tfidf_model.pkl)
+# ==========================================================
+def vi_tokenizer(text: str):
+    return ViTokenizer.tokenize(text).split()
+
 
 
 # -------------------------
