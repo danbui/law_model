@@ -1,192 +1,170 @@
+# streamlit_app.py
 import streamlit as st
-from sentence_transformers import SentenceTransformer
-from qdrant_client import QdrantClient, models
-import pickle
-from pyvi import ViTokenizer
-from sklearn.feature_extraction.text import TfidfVectorizer # Required for pickle
-import numpy as np
-import re
+
+from retrieval import load_resources, hybrid_search, parse_filter_hints
+
 
 # -------------------------
-# CONFIG
+# PAGE CONFIG
 # -------------------------
-QDRANT_PATH = "./qdrant_db"
-COLLECTION_NAME = "vn_law"
+st.set_page_config(page_title="Vietnamese Law Hybrid Search", page_icon="⚖️")
 
-# -------------------------
-# HELPER (Must be defined globally for pickle sometimes, but mostly safe locally if properly imported)
-# -------------------------
-def vi_tokenizer(text):
-    return ViTokenizer.tokenize(text).split()
+st.title("⚖️ Vietnamese Law Hybrid Search")
+st.caption("Hỏi đáp luật Việt Nam (Hybrid Search: Dense + Sparse + RRF).")
+
 
 # -------------------------
 # LOAD RESOURCES
 # -------------------------
 @st.cache_resource
-def load_dense_model():
-    return SentenceTransformer("bkai-foundation-models/vietnamese-bi-encoder")
+def get_resources():
+    return load_resources()
 
-@st.cache_resource
-def load_sparse_model():
-    try:
-        with open("tfidf_model.pkl", "rb") as f:
-            return pickle.load(f)
-    except FileNotFoundError:
-        return None
+try:
+    r = get_resources()
+except FileNotFoundError:
+    st.error("⚠️ Không tìm thấy `tfidf_model.pkl`. Hãy chạy ingest trước: `python preprocess_word.py`.")
+    st.stop()
+except Exception as e:
+    # Qdrant locked or other issues
+    msg = str(e)
+    if "already accessed" in msg or "locked" in msg.lower():
+        st.error(
+            "⚠️ Qdrant Local đang bị khóa bởi tiến trình khác.\n\n"
+            "👉 Hãy tắt các tab/app đang dùng Qdrant hoặc vào **Manage App → Reboot App**."
+        )
+        st.stop()
+    st.error(f"⚠️ Lỗi load resources: {e}")
+    st.stop()
 
-@st.cache_resource
-def get_qdrant_client():
-    try:
-        client = QdrantClient(path=QDRANT_PATH)
-        # Ensure Index Exists (safe to call repeatedly)
-        try:
-            client.create_payload_index(
-                collection_name=COLLECTION_NAME,
-                field_name="article",
-                field_schema="text"
-            )
-        except Exception:
-            pass # Ignore if already exists or other minor issues
-        return client
-    except Exception as e:
-        if "already accessed" in str(e):
-            st.error(
-                "⚠️ **Lỗi kết nối bộ nhớ (Database Locked)**\n\n"
-                "Qdrant Local đang bị khóa bởi một tiến trình khác (có thể do app đang khởi động lại hoặc có nhiều tab mở).\n\n"
-                "👉 **Giải pháp**: Hãy vào **Manage App** (góc dưới phải) -> chọn **Reboot App** để khởi động lại sạch sẽ."
-            )
-            st.stop()
-        else:
-            raise e
 
 # -------------------------
-# UI LAYOUT
+# SIDEBAR
 # -------------------------
-st.set_page_config(page_title="Vietnamese Law Hybrid Search", page_icon="⚖️")
-
-st.title("⚖️ Vietnamese Law Hybrid Search")
-st.caption("Ask me anything about Vietnamese Law. Using Hybrid Search (Dense + Sparse).")
-
-# Sidebar for settings
 with st.sidebar:
     st.header("Settings")
-    top_k = st.slider("Number of results", min_value=1, max_value=20, value=5)
+    top_k = st.slider("Số kết quả", min_value=1, max_value=20, value=5)
+
+    show_score = st.checkbox("Hiện score", value=False)
+    show_full_default = st.checkbox("Mở sẵn nội dung đầy đủ", value=False)
 
     st.markdown("---")
     if st.button("Xóa lịch sử chat"):
-        st.session_state.messages = [{"role": "assistant", "content": "Xin chào! Tôi có thể giúp gì cho bạn về pháp luật Việt Nam hôm nay?"}]
+        st.session_state.messages = [
+            {"role": "assistant", "content": "Xin chào! Tôi có thể giúp gì cho bạn về pháp luật Việt Nam hôm nay?"}
+        ]
         st.rerun()
 
-# Initialize chat history
-if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "assistant", "content": "Xin chào! Tôi có thể giúp gì cho bạn về pháp luật Việt Nam hôm nay?"}]
 
-# Display chat messages from history on app rerun
+# -------------------------
+# INIT CHAT HISTORY
+# -------------------------
+if "messages" not in st.session_state:
+    st.session_state.messages = [
+        {"role": "assistant", "content": "Xin chào! Tôi có thể giúp gì cho bạn về pháp luật Việt Nam hôm nay?"}
+    ]
+
+
+# -------------------------
+# RENDER HISTORY
+# -------------------------
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Load models early (or lazy load inside search)
-dense_model = load_dense_model()
-sparse_model = load_sparse_model()
-client = get_qdrant_client()
 
-if not sparse_model:
-    st.error("⚠️ Sparse Model not found! Please run data ingestion first (`python preprocess_word.py`).")
-
-# React to user input
-if prompt := st.chat_input("Nhập câu hỏi của bạn ở đây..."):
-    # Display user message in chat message container
+# -------------------------
+# CHAT INPUT
+# -------------------------
+prompt = st.chat_input("Nhập câu hỏi của bạn ở đây...")
+if prompt:
+    # user message
     st.chat_message("user").markdown(prompt)
-    # Add user message to chat history
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    if not sparse_model:
-        st.stop()
-
-    # Search logic
+    # search
     try:
-        # -------------------------
-        # METADATA EXTRACTION (FILTERING)
-        # -------------------------
-        article_match = re.search(r"(?:điều|đ)\s*(\d+)", prompt, re.IGNORECASE)
-        qdrant_filter = None
+        results, q_filter = hybrid_search(prompt, top_k, r)
 
-        if article_match:
-            article_num = article_match.group(1)
-            # Apply Filter
-            qdrant_filter = models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key="article",
-                        match=models.MatchText(text=f"Điều {article_num}")
-                    )
-                ]
-            )
+        article_num, clause_num, point_id = parse_filter_hints(prompt)
+        filter_badge = []
+        if article_num is not None:
+            filter_badge.append(f"Điều {article_num}")
+        if clause_num is not None:
+            filter_badge.append(f"Khoản {clause_num}")
+        if point_id is not None:
+            filter_badge.append(f"Điểm {point_id}")
 
-        # -------------------------
-        # HYBRID EMBEDDING
-        # -------------------------
-        # 1. Dense
-        query_dense = dense_model.encode(prompt, normalize_embeddings=True).tolist()
-
-        # 2. Sparse
-        query_sparse_data = sparse_model.transform([prompt])
-        indices = query_sparse_data.indices.tolist()
-        values = query_sparse_data.data.tolist()
-
-        # -------------------------
-        # SEARCH
-        # -------------------------
-        results = client.query_points(
-            collection_name=COLLECTION_NAME,
-            prefetch=[
-                models.Prefetch(
-                    query=models.SparseVector(indices=indices, values=values),
-                    using="sparse",
-                    filter=qdrant_filter, # Filter applied
-                    limit=top_k * 2,
-                ),
-                models.Prefetch(
-                    query=query_dense,
-                    using="dense",
-                    filter=qdrant_filter, # Filter applied
-                    limit=top_k * 2,
-                ),
-            ],
-            query=models.FusionQuery(fusion=models.Fusion.RRF),
-            limit=top_k
-        )
-
-        # -------------------------
-        # FORMAT RESULTS
-        # -------------------------
+        # build assistant response (markdown)
         if not results.points:
-            response_content = "Không tìm thấy kết quả phù hợp."
-            if article_match:
-                response_content += f" (Đã lọc theo Điều {article_num})"
+            response_md = "Không tìm thấy kết quả phù hợp."
+            if filter_badge:
+                response_md += "\n\n*(Đã áp dụng lọc: " + ", ".join(filter_badge) + ")*"
         else:
-            response_content = f"**Tìm thấy {len(results.points)} kết quả:**\n\n"
-            if article_match:
-                 response_content += f"*(Đã lọc kết quả thuộc Điều {article_num})*\n\n"
+            response_md = f"**Tìm thấy {len(results.points)} kết quả.**"
+            if filter_badge:
+                response_md += "\n\n*(Đã áp dụng lọc: " + ", ".join(filter_badge) + ")*"
 
-            for idx, point in enumerate(results.points, 1):
-                payload = point.payload
-                
-                article = payload.get('article', 'N/A')
-                clause = payload.get('clause', 'N/A')
-                content = payload.get("text", "N/A")
-                
-                response_content += f"### {idx}. Điều {article}, Khoản {clause}\n"
-                response_content += f"> {content}\n\n"
-                response_content += "---\n"
+            # Render as rich UI in assistant message area
+            with st.chat_message("assistant"):
+                st.markdown(response_md)
+
+                for i, p in enumerate(results.points, 1):
+                    payload = p.payload or {}
+
+                    doc_id = payload.get("doc_id", "N/A")
+                    chapter = payload.get("chapter", "")
+                    chapter_title = payload.get("chapter_title", "")
+
+                    article = payload.get("article", "N/A")   # đã là "Điều 10. ..."
+                    clause = payload.get("clause", None)      # "1." hoặc "Khoản 1."
+                    point = payload.get("point", None)        # "a)"
+                    text = payload.get("text", "")
+
+                    # Title line
+                    title_parts = [article]
+                    if clause:
+                        title_parts.append(f"Khoản {clause}".replace("Khoản Khoản", "Khoản").strip())
+                    if point:
+                        title_parts.append(f"Điểm {point}".replace("Điểm Điểm", "Điểm").strip())
+                    title = " • ".join([t for t in title_parts if t])
+
+                    st.markdown(f"### {i}. {title}")
+
+                    meta_line = " | ".join([x for x in [doc_id, (chapter + " " + chapter_title).strip()] if x.strip()])
+                    if meta_line:
+                        st.caption(meta_line)
+
+                    if show_score:
+                        st.caption(f"score: {p.score:.4f}")
+
+                    # snippet
+                    snippet = text[:350] + ("..." if len(text) > 350 else "")
+                    if snippet:
+                        st.markdown(f"> {snippet}")
+
+                    # full content
+                    if show_full_default:
+                        st.markdown(text)
+                    else:
+                        with st.expander("Xem đầy đủ"):
+                            st.markdown(text)
+
+                    st.divider()
+
+            # also store a compact text version in history (so rerun still shows something)
+            # (Keep it short to avoid re-render duplication)
+            st.session_state.messages.append({"role": "assistant", "content": response_md})
+            st.stop()
 
     except Exception as e:
-        response_content = f"Đã xảy ra lỗi: {e}\n\nHãy kiểm tra log."
+        response_md = f"Đã xảy ra lỗi: {e}\n\nHãy kiểm tra log."
+        with st.chat_message("assistant"):
+            st.markdown(response_md)
+        st.session_state.messages.append({"role": "assistant", "content": response_md})
+        st.stop()
 
-    # Display assistant response in chat message container
+    # If no results path reached here (rare), render response_md
     with st.chat_message("assistant"):
-        st.markdown(response_content)
-    
-    # Add assistant response to chat history
-    st.session_state.messages.append({"role": "assistant", "content": response_content})
+        st.markdown(response_md)
+    st.session_state.messages.append({"role": "assistant", "content": response_md})
