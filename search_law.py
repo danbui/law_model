@@ -2,10 +2,8 @@
 import sys
 
 from retrieval import load_resources, hybrid_search
-from pyvi import ViTokenizer
 
-def vi_tokenizer(text: str):
-    return ViTokenizer.tokenize(text).split()
+
 
 
 

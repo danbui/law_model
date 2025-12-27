@@ -10,6 +10,13 @@ from pathlib import Path
 
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient, models
+from pyvi import ViTokenizer
+from bm25_util import BM25SparseVectorizer
+
+
+def vi_tokenizer(text: str):
+    return ViTokenizer.tokenize(text).split()
+
 
 
 # ==========================================================
@@ -110,7 +117,13 @@ def hybrid_search(prompt: str, top_k: int, r: Resources):
     q_dense = r.dense_model.encode(prompt, normalize_embeddings=True).tolist()
 
     # Sparse
-    q_sparse = r.sparse_model.transform([prompt])
+    # Sparse
+    # For BM25, use transform_query for the query side (usually just TF)
+    if hasattr(r.sparse_model, "transform_query"):
+        q_sparse = r.sparse_model.transform_query([prompt])
+    else:
+        # Fallback for old TF-IDF model if mixed
+        q_sparse = r.sparse_model.transform([prompt])
     indices = q_sparse.indices.tolist()
     values = q_sparse.data.tolist()
 

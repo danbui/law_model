@@ -1,14 +1,8 @@
-# streamlit_app.py
 import streamlit as st
 
 from retrieval import load_resources, hybrid_search, parse_filter_hints
-from pyvi import ViTokenizer
 
-# ==========================================================
-# TOKENIZER HELPER (Needed for pickle.load of tfidf_model.pkl)
-# ==========================================================
-def vi_tokenizer(text: str):
-    return ViTokenizer.tokenize(text).split()
+
 
 
 
@@ -113,56 +107,64 @@ if prompt:
             if filter_badge:
                 response_md += "\n\n*(Đã áp dụng lọc: " + ", ".join(filter_badge) + ")*"
 
-            # Render as rich UI in assistant message area
+            # Build the full markdown response
+            full_response_md = response_md  # Start with the summary line
+
+            for i, p in enumerate(results.points, 1):
+                payload = p.payload or {}
+
+                doc_id = payload.get("doc_id", "N/A")
+                chapter = payload.get("chapter", "")
+                chapter_title = payload.get("chapter_title", "")
+
+                article = payload.get("article", "N/A")
+                clause = payload.get("clause", None)
+                point = payload.get("point", None)
+                text = payload.get("text", "")
+
+                # Title construction
+                title_parts = [article]
+                if clause:
+                    title_parts.append(f"Khoản {clause}".replace("Khoản Khoản", "Khoản").strip())
+                if point:
+                    title_parts.append(f"Điểm {point}".replace("Điểm Điểm", "Điểm").strip())
+                title = " • ".join([t for t in title_parts if t])
+
+                # Build markdown for this item
+                item_md = f"\n\n---\n\n### {i}. {title}\n"
+                
+                meta_line = " | ".join([x for x in [doc_id, (chapter + " " + chapter_title).strip()] if x.strip()])
+                if meta_line:
+                    item_md += f"_{meta_line}_\n\n"
+                
+                if show_score:
+                    item_md += f"*(Score: {p.score:.4f})*\n\n"
+
+                snippet = text[:350] + ("..." if len(text) > 350 else "")
+                
+                # Use HTML details/summary for collapsible content if possible, 
+                # or just blockquote the snippet. Streamlit markdown supports HTML roughly.
+                # Let's try <details> for a cleaner look that persists if Streamlit supports it (it usually allows basic HTML).
+                # But to be safe and consistent with the previous design:
+                item_md += f"> {snippet}\n"
+                
+                if show_full_default:
+                    item_md += f"\n{text}\n"
+                else:
+                    # We can't use st.expander in a saved string easily. 
+                    # We'll just leave it as snippet in history, or maybe add a Note.
+                    # For now, let's just show the snippet.
+                    pass
+
+                full_response_md += item_md
+
+            # Render the full response once
             with st.chat_message("assistant"):
-                st.markdown(response_md)
+                st.markdown(full_response_md)
 
-                for i, p in enumerate(results.points, 1):
-                    payload = p.payload or {}
-
-                    doc_id = payload.get("doc_id", "N/A")
-                    chapter = payload.get("chapter", "")
-                    chapter_title = payload.get("chapter_title", "")
-
-                    article = payload.get("article", "N/A")   # đã là "Điều 10. ..."
-                    clause = payload.get("clause", None)      # "1." hoặc "Khoản 1."
-                    point = payload.get("point", None)        # "a)"
-                    text = payload.get("text", "")
-
-                    # Title line
-                    title_parts = [article]
-                    if clause:
-                        title_parts.append(f"Khoản {clause}".replace("Khoản Khoản", "Khoản").strip())
-                    if point:
-                        title_parts.append(f"Điểm {point}".replace("Điểm Điểm", "Điểm").strip())
-                    title = " • ".join([t for t in title_parts if t])
-
-                    st.markdown(f"### {i}. {title}")
-
-                    meta_line = " | ".join([x for x in [doc_id, (chapter + " " + chapter_title).strip()] if x.strip()])
-                    if meta_line:
-                        st.caption(meta_line)
-
-                    if show_score:
-                        st.caption(f"score: {p.score:.4f}")
-
-                    # snippet
-                    snippet = text[:350] + ("..." if len(text) > 350 else "")
-                    if snippet:
-                        st.markdown(f"> {snippet}")
-
-                    # full content
-                    if show_full_default:
-                        st.markdown(text)
-                    else:
-                        with st.expander("Xem đầy đủ"):
-                            st.markdown(text)
-
-                    st.divider()
-
-            # also store a compact text version in history (so rerun still shows something)
-            # (Keep it short to avoid re-render duplication)
-            st.session_state.messages.append({"role": "assistant", "content": response_md})
+            # Save to history
+            st.session_state.messages.append({"role": "assistant", "content": full_response_md})
+            # st.stop() remove stop to allow normal flow if needed, but here it's fine.
             st.stop()
 
     except Exception as e:

@@ -19,8 +19,9 @@ from qdrant_client.models import (
     Distance,
     SparseIndexParams,
 )
-from pyvi import ViTokenizer
+
 from sklearn.feature_extraction.text import TfidfVectorizer
+from bm25_util import BM25SparseVectorizer
 
 
 # ==========================================================
@@ -217,8 +218,7 @@ def chunk_vietnamese_law(text: str, doc_id: str):
 # ==========================================================
 # TOKENIZER HELPER (for TF-IDF)
 # ==========================================================
-def vi_tokenizer(text: str):
-    return ViTokenizer.tokenize(text).split()
+from retrieval import vi_tokenizer
 
 
 # ==========================================================
@@ -281,20 +281,23 @@ def main():
     )
     dense_dim = dense_embeddings.shape[1]
 
-    # 4) Sparse model (TF-IDF)
-    print("Training Sparse Model (TF-IDF with pyvi)...")
-    sparse_model = TfidfVectorizer(
-        tokenizer=vi_tokenizer,
-        token_pattern=None,  # Use tokenizer only
-        lowercase=True,
-        min_df=1
-    )
+    # 4) Sparse model (BM25)
+    print("Training Sparse Model (BM25)...")
+    # sparse_model = TfidfVectorizer(
+    #     tokenizer=vi_tokenizer,
+    #     token_pattern=None,  # Use tokenizer only
+    #     lowercase=True,
+    #     min_df=1
+    # )
+    sparse_model = BM25SparseVectorizer(tokenizer=vi_tokenizer)
+    
     sparse_matrix = sparse_model.fit_transform(texts)
-    print(f"Sparse vocabulary size: {len(sparse_model.vocabulary_)}")
+    # vocabulary_ is inside vectorizer
+    print(f"Sparse vocabulary size: {len(sparse_model.vectorizer.vocabulary_)}")
 
     with open(TFIDF_MODEL_PATH, "wb") as f:
         pickle.dump(sparse_model, f)
-    print(f"Saved sparse model to: {TFIDF_MODEL_PATH}")
+    print(f"Saved sparse model (BM25) to: {TFIDF_MODEL_PATH}")
 
     # 5) Recreate Qdrant collection (hybrid)
     print("Recreating Qdrant collection...")
