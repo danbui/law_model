@@ -28,5 +28,10 @@ BM25_B = 0.75
 SPARSE_LIMIT = 50   # Top K candidates from BM25
 DENSE_LIMIT = 100   # Top K candidates from Dense Vector
 
+
 # Final number of results to return after RRF fusion
 FUSION_LIMIT = 60
+
+# GEMINI CONFIGURATION
+GEMINI_API_KEY = "AIzaSyCjYd-OvpVFkLBha6q2pJWNICJy_2auEJI"
+GEMINI_MODEL_NAME = "gemini-1.5-flash"

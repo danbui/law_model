@@ -8,3 +8,4 @@ python-docx
 rank_bm25
 pyvi
 scikit-learn
+google-generativeai

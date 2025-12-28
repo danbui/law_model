@@ -1,10 +1,10 @@
 import streamlit as st
-
+import config
+import generation
 from retrieval import load_resources, hybrid_search, parse_filter_hints
 
-
-
-
+# Initialize Gemini
+generation.initialize_gemini()
 
 # -------------------------
 # PAGE CONFIG
@@ -12,7 +12,7 @@ from retrieval import load_resources, hybrid_search, parse_filter_hints
 st.set_page_config(page_title="Vietnamese Law Hybrid Search", page_icon="⚖️")
 
 st.title("⚖️ Vietnamese Law Hybrid Search")
-st.caption("Hỏi đáp luật Việt Nam (Hybrid Search: Dense + Sparse + RRF).")
+st.caption("Hỏi đáp luật Việt Nam (Hybrid Search: Dense + Sparse + RRF) + Gemini AI.")
 
 
 # -------------------------
@@ -43,19 +43,12 @@ except Exception as e:
 # -------------------------
 # SIDEBAR
 # -------------------------
-import config
-
-# ...
-
-# -------------------------
-# SIDEBAR
-# -------------------------
 with st.sidebar:
     st.header("Settings")
     top_k = st.slider("Số kết quả", min_value=1, max_value=config.FUSION_LIMIT, value=10)
 
     show_score = st.checkbox("Hiện score", value=False)
-    show_full_default = st.checkbox("Mở sẵn nội dung đầy đủ", value=False)
+    show_full_default = st.checkbox("Mở sẵn nội dung đầy đủ (Original Log)", value=False)
 
     st.markdown("---")
     if st.button("Xóa lịch sử chat"):
@@ -110,12 +103,22 @@ if prompt:
             if filter_badge:
                 response_md += "\n\n*(Đã áp dụng lọc: " + ", ".join(filter_badge) + ")*"
         else:
-            response_md = f"**Tìm thấy {len(results.points)} kết quả.**"
+            # ---------------------------------------------------------
+            # GENERATE AI ANSWER (RAG)
+            # ---------------------------------------------------------
+            with st.spinner("Gemini đang đọc luật và suy nghĩ..."):
+                ai_answer = generation.generate_answer(prompt, results.points)
+            
+            # Format AI Answer
+            response_md = f"#### 🤖 Trả lời (Gemini):\n{ai_answer}\n\n"
+            response_md += "---\n"
+            
+            response_md += f"**Tìm thấy {len(results.points)} văn bản gốc:**"
             if filter_badge:
                 response_md += "\n\n*(Đã áp dụng lọc: " + ", ".join(filter_badge) + ")*"
 
             # Build the full markdown response
-            full_response_md = response_md  # Start with the summary line
+            full_response_md = response_md
 
             for i, p in enumerate(results.points, 1):
                 payload = p.payload or {}
@@ -148,30 +151,19 @@ if prompt:
                     item_md += f"*(Score: {p.score:.4f})*\n\n"
 
                 snippet = text[:350] + ("..." if len(text) > 350 else "")
-                
-                # Use HTML details/summary for collapsible content if possible, 
-                # or just blockquote the snippet. Streamlit markdown supports HTML roughly.
-                # Let's try <details> for a cleaner look that persists if Streamlit supports it (it usually allows basic HTML).
-                # But to be safe and consistent with the previous design:
                 item_md += f"> {snippet}\n"
                 
                 if show_full_default:
                     item_md += f"\n{text}\n"
-                else:
-                    # We can't use st.expander in a saved string easily. 
-                    # We'll just leave it as snippet in history, or maybe add a Note.
-                    # For now, let's just show the snippet.
-                    pass
 
                 full_response_md += item_md
 
-            # Render the full response once
+            # Render the full response
             with st.chat_message("assistant"):
                 st.markdown(full_response_md)
 
             # Save to history
             st.session_state.messages.append({"role": "assistant", "content": full_response_md})
-            # st.stop() remove stop to allow normal flow if needed, but here it's fine.
             st.stop()
 
     except Exception as e:
@@ -180,8 +172,3 @@ if prompt:
             st.markdown(response_md)
         st.session_state.messages.append({"role": "assistant", "content": response_md})
         st.stop()
-
-    # If no results path reached here (rare), render response_md
-    with st.chat_message("assistant"):
-        st.markdown(response_md)
-    st.session_state.messages.append({"role": "assistant", "content": response_md})
