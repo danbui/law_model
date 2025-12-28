@@ -1,8 +1,12 @@
-
+import math
 import numpy as np
-import scipy.sparse as sp
+from scipy import sparse
 from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
+from pyvi import ViTokenizer
+
+def vi_tokenizer(text):
+    return ViTokenizer.tokenize(text).split()
 
 class BM25SparseVectorizer(BaseEstimator, TransformerMixin):
     def __init__(self, tokenizer=None, k1=1.5, b=0.75):
@@ -36,7 +40,7 @@ class BM25SparseVectorizer(BaseEstimator, TransformerMixin):
         # Correct potential negative IDFs (stop words) -> usually set to 0 or epsilon
         idf[idf < 0] = 0
         
-        self.idf_diag = sp.diags(idf)
+        self.idf_diag = sparse.diags(idf)
         return self
 
     def transform(self, raw_documents):

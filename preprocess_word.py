@@ -278,6 +278,11 @@ def chunk_law_text(full_text, doc_filename):
 
 
 # ==========================================================
+# TOKENIZER
+# ==========================================================
+from bm25_util import vi_tokenizer
+
+# ==========================================================
 # MAIN
 # ==========================================================
 def main():
@@ -312,13 +317,10 @@ def main():
         
     print(f"Total chunks generated: {len(all_chunks)}")
     
+    
     if not all_chunks:
         print("No chunks to process. Exiting.")
         return
-
-    # Prepare tokenizer for BM25
-    def vi_tokenizer(text):
-        return ViTokenizer.tokenize(text).split()
 
     # 3) Dense embeddings
     print(f"Loading Dense Model ({config.DENSE_MODEL_NAME})...")
