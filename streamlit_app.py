@@ -43,9 +43,16 @@ except Exception as e:
 # -------------------------
 # SIDEBAR
 # -------------------------
+import config
+
+# ...
+
+# -------------------------
+# SIDEBAR
+# -------------------------
 with st.sidebar:
     st.header("Settings")
-    top_k = st.slider("Số kết quả", min_value=1, max_value=20, value=5)
+    top_k = st.slider("Số kết quả", min_value=1, max_value=config.FUSION_LIMIT, value=10)
 
     show_score = st.checkbox("Hiện score", value=False)
     show_full_default = st.checkbox("Mở sẵn nội dung đầy đủ", value=False)

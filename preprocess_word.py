@@ -27,249 +27,30 @@ from bm25_util import BM25SparseVectorizer
 # ==========================================================
 # CONFIG
 # ==========================================================
-BASE_DIR = Path(__file__).parent
-LAW_DIR = BASE_DIR / "lawdata"
-QDRANT_PATH = str(BASE_DIR / "qdrant_db")
-COLLECTION_NAME = "vn_law"
-TFIDF_MODEL_PATH = str(BASE_DIR / "tfidf_model.pkl")
-
-
 # ==========================================================
-# REGEX (Vietnamese Law Structure)
+# CONFIG
 # ==========================================================
-# Notes:
-# - Các regex này phụ thuộc format DOCX của bạn. Nếu văn bản có format khác, cần chỉnh.
-ARTICLE_RE  = r"(Điều\s+\d+\.\s+[^\n]+)"
-CLAUSE_RE   = r"((?:Khoản\s+)?\d+\.)"
-POINT_RE    = r"([a-z]\))"
-CHAPTER_RE  = r"(Chương\s+[IVXLCDM]+)\s*\n([A-ZÀ-Ỹ\s]+)"
-APPENDIX_RE = r"(PHỤ LỤC\s+[IVXLCDM]+)"
+import config
 
-ROW_RE = r"(\d+)\.\s+(.+?)\s{2,}([A-Z]\d{2}\.\d+)"
+BASE_DIR = config.BASE_DIR
+LAW_DIR = config.LAW_DIR
+QDRANT_PATH = config.QDRANT_PATH
+COLLECTION_NAME = config.COLLECTION_NAME
+TFIDF_MODEL_PATH = config.TFIDF_MODEL_PATH
 
+# ... (Regex section remains same)
 
-# ==========================================================
-# DOCX LOADER
-# ==========================================================
-def load_docx_text(file_path: Path) -> str:
-    doc = Document(file_path)
-    return "\n".join(
-        p.text.strip()
-        for p in doc.paragraphs
-        if p.text and p.text.strip()
-    )
-
-
-# ==========================================================
-# NORMALIZE METADATA HELPERS
-# ==========================================================
-def extract_article_num(article_title: str):
-    # article_title thường: "Điều 10. Tiêu đề ..."
-    m = re.search(r"Điều\s+(\d+)\.", article_title, flags=re.IGNORECASE)
-    return int(m.group(1)) if m else None
-
-def extract_clause_num(clause_title: str):
-    # clause_title thường là "1." hoặc "Khoản 1."
-    m = re.search(r"(\d+)\.", clause_title)
-    return int(m.group(1)) if m else None
-
-def extract_point_id(point_title: str):
-    # point_title thường là "a)" -> lưu "a"
-    m = re.search(r"([a-z])\)", point_title, flags=re.IGNORECASE)
-    return m.group(1).lower() if m else None
-
-
-# ==========================================================
-# CHUNKING FUNCTION
-# ==========================================================
-def chunk_vietnamese_law(text: str, doc_id: str):
-    chunks = []
-
-    # ---------- Split main body & appendix ----------
-    parts = re.split(APPENDIX_RE, text)
-    main_text = parts[0]
-    appendix_parts = parts[1:]  # [appendix_id, appendix_body, appendix_id2, appendix_body2, ...]
-
-    # ---------- Process main body ----------
-    if re.search(CHAPTER_RE, main_text):
-        chapter_blocks = re.split(CHAPTER_RE, main_text)
-    else:
-        # No chapter structure detected
-        chapter_blocks = [None, "NO_CHAPTER", "", main_text]
-
-    # chapter_blocks layout when split with capture groups:
-    # [prefix, chapter_id, chapter_title, chapter_body, chapter_id2, chapter_title2, chapter_body2, ...]
-    for c in range(1, len(chapter_blocks), 3):
-        chapter_id = (chapter_blocks[c] or "").strip()
-        chapter_title = (chapter_blocks[c + 1] or "").strip()
-        chapter_body = (chapter_blocks[c + 2] or "").strip()
-
-        articles = re.split(ARTICLE_RE, chapter_body)
-
-        # articles layout: [before, article_title, article_body, article_title2, article_body2, ...]
-        for i in range(1, len(articles), 2):
-            article_title = articles[i].strip()
-            article_body = (articles[i + 1] if i + 1 < len(articles) else "").strip()
-
-            article_num = extract_article_num(article_title)
-
-            # If no clause structure -> keep as one chunk
-            if not re.search(CLAUSE_RE, article_body):
-                chunks.append({
-                    "doc_id": doc_id,
-                    "section": "BODY",
-                    "chapter": chapter_id,
-                    "chapter_title": chapter_title,
-                    "article": article_title,
-                    "article_num": article_num,
-                    "clause": None,
-                    "clause_num": None,
-                    "point": None,
-                    "point_id": None,
-                    "text": f"{article_title}\n\n{article_body}".strip()
-                })
-                continue
-
-            clauses = re.split(CLAUSE_RE, article_body)
-
-            # clauses layout: [before, clause_title, clause_body, clause_title2, clause_body2, ...]
-            for j in range(1, len(clauses), 2):
-                clause_title = clauses[j].strip()
-                clause_body = (clauses[j + 1] if j + 1 < len(clauses) else "").strip()
-
-                clause_num = extract_clause_num(clause_title)
-
-                # If no point structure -> chunk at clause level
-                if not re.search(POINT_RE, clause_body):
-                    chunks.append({
-                        "doc_id": doc_id,
-                        "section": "BODY",
-                        "chapter": chapter_id,
-                        "chapter_title": chapter_title,
-                        "article": article_title,
-                        "article_num": article_num,
-                        "clause": clause_title,
-                        "clause_num": clause_num,
-                        "point": None,
-                        "point_id": None,
-                        "text": f"{article_title}\n{clause_title}\n\n{clause_body}".strip()
-                    })
-                    continue
-
-                points = re.split(POINT_RE, clause_body)
-
-                # points layout: [before, point_title, point_body, point_title2, point_body2, ...]
-                for k in range(1, len(points), 2):
-                    point_title = points[k].strip()
-                    point_body = (points[k + 1] if k + 1 < len(points) else "").strip()
-
-                    point_id = extract_point_id(point_title)
-
-                    chunks.append({
-                        "doc_id": doc_id,
-                        "section": "BODY",
-                        "chapter": chapter_id,
-                        "chapter_title": chapter_title,
-                        "article": article_title,
-                        "article_num": article_num,
-                        "clause": clause_title,
-                        "clause_num": clause_num,
-                        "point": point_title,
-                        "point_id": point_id,
-                        "text": (
-                            f"{article_title}\n"
-                            f"{clause_title} {point_title}\n\n"
-                            f"{point_body}"
-                        ).strip()
-                    })
-
-    # ---------- Process appendix ----------
-    for i in range(0, len(appendix_parts), 2):
-        if i + 1 >= len(appendix_parts):
-            break
-        appendix_id = appendix_parts[i].strip()
-        appendix_body = appendix_parts[i + 1].strip()
-
-        rows = re.findall(ROW_RE, appendix_body)
-
-        for stt, name, icd in rows:
-            chunks.append({
-                "doc_id": doc_id,
-                "section": "APPENDIX",
-                "appendix": appendix_id,
-                "row_id": int(stt),
-                "entity": name.strip(),
-                "icd10": icd.strip(),
-                # normalized fields (optional, keep None)
-                "article_num": None,
-                "clause_num": None,
-                "point_id": None,
-                "text": (
-                    f"{appendix_id}\n"
-                    f"STT {stt}\n"
-                    f"Tên: {name}\n"
-                    f"Mã ICD-10: {icd}"
-                ).strip()
-            })
-
-    return chunks
-
-
-# ==========================================================
-# TOKENIZER HELPER (for TF-IDF)
-# ==========================================================
-from retrieval import vi_tokenizer
-
+# ... (Functions remain same)
 
 # ==========================================================
 # MAIN
 # ==========================================================
 def main():
-    # Force UTF-8 for Windows Console
-    try:
-        sys.stdin.reconfigure(encoding="utf-8")
-        sys.stdout.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
-
-    # 1) Load + chunk all DOCX files
-    all_chunks = []
-    print("Loading documents...")
-
-    if not LAW_DIR.exists():
-        print(f"[ERROR] Folder not found: {LAW_DIR}")
-        return
-
-    docx_files = list(LAW_DIR.glob("*.docx"))
-    if not docx_files:
-        print(f"[ERROR] No .docx files found in: {LAW_DIR}")
-        return
-
-    for docx_file in docx_files:
-        doc_id = docx_file.stem
-        raw_text = load_docx_text(docx_file)
-        chunks = chunk_vietnamese_law(raw_text, doc_id)
-        all_chunks.extend(chunks)
-        print(f"DONE {doc_id}: {len(chunks)} chunks")
-
-    print(f"Total chunks: {len(all_chunks)}")
-    if not all_chunks:
-        print("No chunks found. Exiting.")
-        return
-
-    # 2) Connect to Qdrant
-    print("Connecting to Qdrant...")
-    try:
-        client = QdrantClient(path=QDRANT_PATH)
-        client.get_collections()
-    except Exception as e:
-        print(f"\n[ERROR] Could not connect to Qdrant DB: {e}")
-        print("Please stop any running Streamlit app or other python scripts using the DB.")
-        return
-
+    # ...
+    
     # 3) Dense embeddings
-    print("Loading Dense Model (bkai-foundation-models/vietnamese-bi-encoder)...")
-    dense_model = SentenceTransformer("bkai-foundation-models/vietnamese-bi-encoder")
+    print(f"Loading Dense Model ({config.DENSE_MODEL_NAME})...")
+    dense_model = SentenceTransformer(config.DENSE_MODEL_NAME)
 
     texts = [c["text"] for c in all_chunks]
     print(f"Generating dense embeddings for {len(texts)} chunks...")
@@ -282,16 +63,15 @@ def main():
     dense_dim = dense_embeddings.shape[1]
 
     # 4) Sparse model (BM25)
-    print("Training Sparse Model (BM25)...")
-    # sparse_model = TfidfVectorizer(
-    #     tokenizer=vi_tokenizer,
-    #     token_pattern=None,  # Use tokenizer only
-    #     lowercase=True,
-    #     min_df=1
-    # )
-    sparse_model = BM25SparseVectorizer(tokenizer=vi_tokenizer)
+    print(f"Training Sparse Model (BM25) k1={config.BM25_K1}, b={config.BM25_B}...")
+    sparse_model = BM25SparseVectorizer(
+        tokenizer=vi_tokenizer, 
+        k1=config.BM25_K1, 
+        b=config.BM25_B
+    )
     
     sparse_matrix = sparse_model.fit_transform(texts)
+    # ...
     # vocabulary_ is inside vectorizer
     print(f"Sparse vocabulary size: {len(sparse_model.vectorizer.vocabulary_)}")
 

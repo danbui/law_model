@@ -22,10 +22,12 @@ def vi_tokenizer(text: str):
 # ==========================================================
 # CONFIG
 # ==========================================================
-BASE_DIR = Path(__file__).parent
-QDRANT_PATH = str(BASE_DIR / "qdrant_db")
-COLLECTION_NAME = "vn_law"
-TFIDF_MODEL_PATH = str(BASE_DIR / "tfidf_model.pkl")
+import config
+
+BASE_DIR = config.BASE_DIR
+QDRANT_PATH = config.QDRANT_PATH
+COLLECTION_NAME = config.COLLECTION_NAME
+TFIDF_MODEL_PATH = config.TFIDF_MODEL_PATH
 
 
 @dataclass
@@ -36,13 +38,14 @@ class Resources:
 
 
 def load_resources() -> Resources:
-    dense_model = SentenceTransformer("bkai-foundation-models/vietnamese-bi-encoder")
+    dense_model = SentenceTransformer(config.DENSE_MODEL_NAME)
 
     with open(TFIDF_MODEL_PATH, "rb") as f:
         sparse_model = pickle.load(f)
 
     client = QdrantClient(path=QDRANT_PATH)
 
+    # ... (rest of load_resources)
     # Ensure payload indexes exist (safe to call repeatedly)
     def _create_index(field_name: str, schema_type):
         try:
@@ -66,6 +69,7 @@ def load_resources() -> Resources:
     return Resources(dense_model=dense_model, sparse_model=sparse_model, client=client)
 
 
+# ... (parse_filter_hints and build_qdrant_filter remain same)
 def parse_filter_hints(prompt: str):
     """
     Extract filter hints from Vietnamese query:
@@ -134,17 +138,17 @@ def hybrid_search(prompt: str, top_k: int, r: Resources):
                 query=models.SparseVector(indices=indices, values=values),
                 using="sparse",
                 filter=q_filter,
-                limit=top_k * 2,
+                limit=config.SPARSE_LIMIT,  # Limit for BM25 branch
             ),
             models.Prefetch(
                 query=q_dense,
                 using="dense",
                 filter=q_filter,
-                limit=top_k * 2,
+                limit=config.DENSE_LIMIT,   # Limit for Dense branch
             ),
         ],
         query=models.FusionQuery(fusion=models.Fusion.RRF),
-        limit=top_k
+        limit=top_k  # This is the final result size (can be user defined or config.FUSION_LIMIT from caller)
     )
 
     return results, q_filter
