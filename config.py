@@ -34,6 +34,10 @@ FUSION_LIMIT = 60
 
 # GEMINI CONFIGURATION
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file (if exists)
+load_dotenv()
 
 # Try to get API KEY from Environment (Local) or Streamlit Secrets (Cloud)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")

@@ -9,3 +9,4 @@ rank_bm25
 pyvi
 scikit-learn
 google-generativeai
+python-dotenv
