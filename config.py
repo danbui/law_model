@@ -33,5 +33,22 @@ DENSE_LIMIT = 100   # Top K candidates from Dense Vector
 FUSION_LIMIT = 60
 
 # GEMINI CONFIGURATION
-GEMINI_API_KEY = "AIzaSyCjYd-OvpVFkLBha6q2pJWNICJy_2auEJI"
+import os
+
+# Try to get API KEY from Environment (Local) or Streamlit Secrets (Cloud)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+if not GEMINI_API_KEY:
+    try:
+        import streamlit as st
+        # Helps avoid error if run outside streamlit context but st is installed
+        if hasattr(st, "secrets"):
+            GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY")
+    except Exception:
+        pass
+
+# Fallback/Placeholder
+if not GEMINI_API_KEY:
+    GEMINI_API_KEY = "" # User must provide this via .env or secrets.toml
+
 GEMINI_MODEL_NAME = "gemini-flash-latest"
