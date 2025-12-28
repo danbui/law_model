@@ -9,9 +9,9 @@ generation.initialize_gemini()
 # -------------------------
 # PAGE CONFIG
 # -------------------------
-st.set_page_config(page_title="Vietnamese Law Hybrid Search", page_icon="⚖️")
+st.set_page_config(page_title="Tra cứu luật BHYT", page_icon="⚖️")
 
-st.title("⚖️ Vietnamese Law Hybrid Search")
+st.title("⚖️ Tra cứu luật BHYT")
 st.caption("Hỏi đáp luật Việt Nam (Hybrid Search: Dense + Sparse + RRF) + Gemini AI.")
 
 
