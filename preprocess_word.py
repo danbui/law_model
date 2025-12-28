@@ -288,41 +288,99 @@ from bm25_util import vi_tokenizer
 def main():
     print("Initializing...")
     
+    # --- CONFIGURATION FLAG: SET TRUE TO UPDATE QA ONLY ---
+    ONLY_PROCESS_JSON = True
+    # ------------------------------------------------------
+    
     # 0) Setup Qdrant
-    # For local disk storage
     client = QdrantClient(path=QDRANT_PATH)
     
-    # 1) Load documents
     if not LAW_DIR.exists():
         print(f"Error: Directory '{LAW_DIR}' not found.")
         sys.exit(1)
         
     docx_files = list(LAW_DIR.glob("*.docx"))
-    if not docx_files:
-        print(f"No .docx files found in {LAW_DIR}")
+    json_files = list(LAW_DIR.glob("*.json"))
+    
+    if not docx_files and not json_files:
+        print(f"No .docx or .json files found in {LAW_DIR}")
         sys.exit(1)
         
-    print(f"Found {len(docx_files)} documents.")
-    
     all_chunks = []
     
-    # 2) Process each file
-    from pyvi import ViTokenizer
+    # 1) Collection & Model Management Logic
+    sparse_model = None
     
-    for fpath in docx_files:
-        print(f"Processing: {fpath.name}")
-        text = extract_text_from_docx(fpath)
-        file_chunks = chunk_law_text(text, fpath.name)
-        all_chunks.extend(file_chunks)
+    if ONLY_PROCESS_JSON:
+        print(">>> MODE: Processing JSON files ONLY (Appending to existing DB) <<<")
         
-    print(f"Total chunks generated: {len(all_chunks)}")
-    
-    
+        # Check if BM25 model exists
+        if not Path(TFIDF_MODEL_PATH).exists():
+            print(f"Error: {TFIDF_MODEL_PATH} not found. Cannot perform partial update without existing BM25 model.")
+            sys.exit(1)
+            
+        # Load existing BM25 Logic
+        print(f"Loading existing BM25 model from {TFIDF_MODEL_PATH}...")
+        with open(TFIDF_MODEL_PATH, "rb") as f:
+            sparse_model = pickle.load(f)
+            
+        # Process ONLY JSON
+        all_chunks = [] # No DOCX chunks
+    else:
+        print(">>> MODE: Full Re-indexing (DOCX + JSON) <<<")
+        # In Full mode, we will train BM25 later
+        all_chunks = []
+        
+        # Process DOCX
+        from pyvi import ViTokenizer
+        for fpath in docx_files:
+            print(f"Processing DOCX: {fpath.name}")
+            text = extract_text_from_docx(fpath)
+            file_chunks = chunk_law_text(text, fpath.name)
+            all_chunks.extend(file_chunks)
+
+    # 2) Always Process JSON (Common Logic)
+    import json
+    for fpath in json_files:
+        print(f"Processing JSON: {fpath.name}")
+        try:
+            with open(fpath, encoding='utf-8') as f:
+                data = json.load(f)
+                
+            if isinstance(data, list):
+                for item in data:
+                    q = item.get("question", "")
+                    a = item.get("answer", "")
+                    qa_id = item.get("qa_id", fpath.name)
+                    doc_id = item.get("doc_id", fpath.name)
+                    
+                    if not q.strip(): continue
+                    
+                    final_text = f"Hỏi: {q}\nĐáp: {a}"
+                    
+                    chunk = {
+                        "doc_id": doc_id,
+                        "chapter": "",
+                        "chapter_title": "",
+                        "article": f"QA: {qa_id}",
+                        "article_num": 0,
+                        "clause_num": 0,
+                        "point_id": None,
+                        "text": final_text,
+                        "type": "qa"
+                    }
+                    all_chunks.append(chunk)
+            else:
+                print(f"Warning: JSON {fpath.name} is not a list. Skipping.")
+        except Exception as e:
+            print(f"Error reading {fpath.name}: {e}")
+
+    print(f"Total chunks to index: {len(all_chunks)}")
     if not all_chunks:
-        print("No chunks to process. Exiting.")
+        print("No chunks found. Exiting.")
         return
 
-    # 3) Dense embeddings
+    # 3) Dense Embeddings (Always needed for the batch)
     print(f"Loading Dense Model ({config.DENSE_MODEL_NAME})...")
     dense_model = SentenceTransformer(config.DENSE_MODEL_NAME)
 
@@ -341,80 +399,99 @@ def main():
 
     dense_dim = dense_embeddings.shape[1]
 
-    # 4) Sparse model (BM25)
-    print(f"Training Sparse Model (BM25) k1={config.BM25_K1}, b={config.BM25_B}...")
-    sparse_model = BM25SparseVectorizer(
-        tokenizer=vi_tokenizer, 
-        k1=config.BM25_K1, 
-        b=config.BM25_B
-    )
-    
-    sparse_matrix = sparse_model.fit_transform(texts)
-    
-    # Save BM25 model
-    print(f"Sparse vocabulary size: {len(sparse_model.vectorizer.vocabulary_)}")
-    with open(TFIDF_MODEL_PATH, "wb") as f:
-        pickle.dump(sparse_model, f)
-    print(f"Saved sparse model (BM25) to: {TFIDF_MODEL_PATH}")
+    # 4) Sparse Embeddings
+    if ONLY_PROCESS_JSON:
+        # Transform using loaded model
+        print("Generating sparse vectors using LOADED BM25 model...")
+        sparse_matrix = sparse_model.transform(texts)
+    else:
+        # Train new model
+        print(f"Training New Sparse Model (BM25)...")
+        sparse_model = BM25SparseVectorizer(
+            tokenizer=vi_tokenizer, 
+            k1=config.BM25_K1, 
+            b=config.BM25_B
+        )
+        sparse_matrix = sparse_model.fit_transform(texts)
+        
+        print(f"Saving new BM25 model to: {TFIDF_MODEL_PATH}")
+        with open(TFIDF_MODEL_PATH, "wb") as f:
+            pickle.dump(sparse_model, f)
+            
+        # Recreate collection only in Full Mode
+        print("Recreating Qdrant collection...")
+        client.recreate_collection(
+            collection_name=COLLECTION_NAME,
+            vectors_config={
+                "dense": VectorParams(size=dense_dim, distance=Distance.COSINE)
+            },
+            sparse_vectors_config={
+                "sparse": SparseVectorParams(
+                    index=SparseIndexParams(on_disk=False)
+                )
+            }
+        )
+        # Create indexes
+        print("Creating payload indexes (article_num, clause_num, point_id)...")
+        def _create_index(field_name: str, schema_type):
+            try:
+                client.create_payload_index(
+                    collection_name=COLLECTION_NAME,
+                    field_name=field_name,
+                    field_schema=schema_type
+                )
+            except Exception:
+                # ignore if already exists or version differences
+                pass
 
-    # 5) Recreate Qdrant collection (hybrid)
-    print("Recreating Qdrant collection...")
-    client.recreate_collection(
-        collection_name=COLLECTION_NAME,
-        vectors_config={
-            "dense": VectorParams(size=dense_dim, distance=Distance.COSINE)
-        },
-        sparse_vectors_config={
-            "sparse": SparseVectorParams(
-                index=SparseIndexParams(on_disk=False)
-            )
-        }
-    )
-
-    # 6) Create payload indexes for reliable filtering
-    print("Creating payload indexes (article_num, clause_num, point_id)...")
-
-    def _create_index(field_name: str, schema_type):
         try:
-            client.create_payload_index(
-                collection_name=COLLECTION_NAME,
-                field_name=field_name,
-                field_schema=schema_type
-            )
+            _create_index("article_num", models.PayloadSchemaType.INTEGER)
+            _create_index("clause_num", models.PayloadSchemaType.INTEGER)
+            _create_index("point_id", models.PayloadSchemaType.KEYWORD)
         except Exception:
-            # ignore if already exists or version differences
-            pass
+            _create_index("article_num", "integer")
+            _create_index("clause_num", "integer")
+            _create_index("point_id", "keyword")
 
-    # Try modern enums first; fallback to strings if needed
-    try:
-        _create_index("article_num", models.PayloadSchemaType.INTEGER)
-        _create_index("clause_num", models.PayloadSchemaType.INTEGER)
-        _create_index("point_id", models.PayloadSchemaType.KEYWORD)
-    except Exception:
-        _create_index("article_num", "integer")
-        _create_index("clause_num", "integer")
-        _create_index("point_id", "keyword")
-
-    # 7) Prepare points
+    # 5) Prepare and Upsert Points
     print("Preparing points...")
     points = []
+    
+    # If appending, we need unique IDs. 
+    # Current simple ID strategy: 0, 1, 2... based on list index.
+    # If we Append, we might overwrite existing IDs 0..N unless we shift ID.
+    # Safe bet for UUIDs or large offsets.
+    # Let's check max ID or use UUIDs? Qdrant allows INT or UUID.
+    # Existing DOCX used INT 0..N.
+    # If we reuse 0..N for JSON, we overwrite DOCX chunks!
+    
+    start_id = 0
+    if ONLY_PROCESS_JSON:
+        # Get current count to offset IDs
+        try:
+            count_res = client.count(collection_name=COLLECTION_NAME, exact=True)
+            start_id = count_res.count
+            print(f"Existing Item Count: {start_id}. New chunks will start from ID {start_id}.")
+        except Exception:
+            print("Could not count existing items. Assuming start_id=100000 to avoid collision.")
+            start_id = 100000
 
     for idx, chunk in enumerate(all_chunks):
         payload = dict(chunk)
-        text_content = payload.pop("text") # Payload text
+        text_content = payload.pop("text") 
 
-        # Dense vector
         dense_vec = dense_embeddings[idx].tolist()
 
-        # Sparse vector (CSR row slice)
         row_start = sparse_matrix.indptr[idx]
         row_end = sparse_matrix.indptr[idx + 1]
         indices = sparse_matrix.indices[row_start:row_end].tolist()
         values = sparse_matrix.data[row_start:row_end].tolist()
+        
+        final_id = start_id + idx
 
         points.append(
             PointStruct(
-                id=idx,
+                id=final_id, 
                 vector={
                     "dense": dense_vec,
                     "sparse": {"indices": indices, "values": values},
@@ -425,7 +502,7 @@ def main():
 
     # 8) Upsert
     BATCH_SIZE = 64
-    print("Upserting to Qdrant (Hybrid)...")
+    print("Upserting to Qdrant...")
     for i in range(0, len(points), BATCH_SIZE):
         batch = points[i:i + BATCH_SIZE]
         client.upsert(collection_name=COLLECTION_NAME, points=batch)
