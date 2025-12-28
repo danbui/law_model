@@ -36,17 +36,17 @@ TFIDF_MODEL_PATH = config.TFIDF_MODEL_PATH
 # ==========================================================
 # REGEX PATTERNS
 # ==========================================================
-# Pattern to identify "Điều X. <Title>"
-# Case insensitive, handles "Điều 1." or "Điều 10."
-# Group 1: Article Number
-# Group 2: Article Title/Content start
-ARTICLE_RE = re.compile(r"^\s*Điều\s+(\d+)\.?", re.IGNORECASE)
+# "Điều 1." or "Điều 1 (sửa đổi)"
+ARTICLE_RE = re.compile(r"^\s*Điều\s+(\d+)", re.IGNORECASE)
 
-# Pattern to identify "Khoản Y. <Content>"
-CLAUSE_RE = re.compile(r"^\s*Khoản\s+(\d+)\.?", re.IGNORECASE)
+# "Khoản 1." or "1." (Start of line)
+CLAUSE_RE = re.compile(r"^(?:Khoản\s+)?(\d+)\.", re.IGNORECASE)
 
-# Pattern to identify "Điểm a <Content>" (Optional, usually inside Clause)
-POINT_RE = re.compile(r"^\s*([a-zđ])\)\s+", re.IGNORECASE)
+# "a)" or "đ)" (Start of line)
+POINT_RE = re.compile(r"^([a-zđ])\)", re.IGNORECASE)
+
+# "Phụ lục I" or "Phụ lục 1"
+APPENDIX_RE = re.compile(r"^\s*Phụ\s+lục\s+([IVX0-9]+|số\s+\d+)", re.IGNORECASE)
 
 
 # ==========================================================
@@ -57,101 +57,222 @@ def extract_text_from_docx(docx_path):
     doc = Document(docx_path)
     full_text = []
     for para in doc.paragraphs:
-        if para.text.strip():
-            full_text.append(para.text.strip())
+        # Normalize whitespace
+        text = " ".join(para.text.split())
+        if text:
+            full_text.append(text)
     return "\n".join(full_text)
 
 def chunk_law_text(full_text, doc_filename):
     """
-    Split text into chunks based on 'Điều'.
-    Returns a list of dicts: 
-    [
-      {
-        "doc_id": "filename.docx",
-        "article_num": 1,
-        "clause_num": None, 
-        "text": "Điều 1. Phạm vi điều chỉnh...",
-        ...
-      }, ...
-    ]
+    Split text into granular chunks:
+    1. Appendix (Phụ lục)
+    2. Article (Điều)
+       -> Clause (Khoản)
+          -> Point (Điểm)
     """
     lines = full_text.split('\n')
     chunks = []
     
-    current_article = None
-    current_text_buffer = []
+    # Global context
+    current_chapter = ""
+    current_chapter_title = ""
     
-    # Metadata for current context
-    current_meta = {
-        "doc_id": doc_filename,
-        "chapter": "",
-        "chapter_title": "",
-        "article": "",     # e.g. "Điều 1"
-        "article_title": ""
-    }
-
-    def flush_buffer():
-        if current_meta["article"] and current_text_buffer:
-            # Join lines
-            content = "\n".join(current_text_buffer)
-            # Try to extract Article Number integer
-            art_num_match = re.search(r"(\d+)", current_meta["article"])
-            art_num_int = int(art_num_match.group(1)) if art_num_match else 0
+    # Hierarchy State
+    # We use a stack or explicit state variables
+    current_appendix = None # If not None, we are in Appendix mode
+    
+    current_article = None
+    current_article_lines = []
+    
+    def flush_article_buffer(art_header, art_lines, chapter, chapter_title):
+        """
+        Process a raw Article block and sub-chunk it into Clauses/Points.
+        """
+        if not art_lines: return
+        
+        # 1. Base Article Info
+        art_match = ARTICLE_RE.search(art_header)
+        art_num = int(art_match.group(1)) if art_match else 0
+        
+        # 2. Iterate lines to find Clauses
+        # Any text before the first Clause is "Clause 0" (Intro)
+        
+        clauses = []
+        current_clause_header = "" # e.g., "1." or "Khoản 1."
+        current_clause_lines = []
+        current_clause_num = 0
+        
+        def flush_clause(c_num, c_header, c_lines):
+            if not c_lines: return
             
-            # TODO: Advanced - Split by Clause (Khoản) if needed. 
-            # For now, we treat one Article as one Chunk to keep context.
-            # If Article is too long, we can sub-chunk.
+            # Sub-process for Points (Điểm)
+            # Hierarchy: Article > Clause > Point
             
-            chunk_obj = {
-                "doc_id": current_meta["doc_id"],
-                "article": current_meta["article"],   # "Điều 1"
-                "article_num": art_num_int,
-                "text": content,
-                "chapter": current_meta["chapter"],
-                "chapter_title": current_meta["chapter_title"]
-            }
-            chunks.append(chunk_obj)
+            points = []
+            current_point_char = ""
+            current_point_lines = []
+            
+            # Content before first Point is "Point Intro"
+            point_intro_lines = []
+            
+            for cline in c_lines:
+                match_p = POINT_RE.match(cline)
+                if match_p:
+                    # Found a new point
+                    # Flush previous point or intro
+                    if current_point_char:
+                        points.append((current_point_char, current_point_lines))
+                    else:
+                        if current_point_lines:
+                            point_intro_lines.extend(current_point_lines)
+                    
+                    current_point_char = match_p.group(1).lower()
+                    current_point_lines = [cline]
+                else:
+                    current_point_lines.append(cline)
+            
+            # Flush last point
+            if current_point_char:
+                points.append((current_point_char, current_point_lines))
+            else:
+                # No points found, everything is intro
+                point_intro_lines.extend(current_point_lines)
+            
+            # ----- CREATE CHUNKS -----
+            
+            # 1. Base Clause Chunk (contains intro text + full text mostly?)
+            # Strategy: If we have points, should we create a chunk for the clause intro?
+            # Yes, if it's significant.
+            
+            # For simplicity & semantic search: 
+            # Output 1 chunk for the Clause Intro (only if points exist), 
+            # and 1 chunk per Point.
+            # If no points, 1 chunk for whole Clause.
+            
+            full_clause_text = "\n".join(c_lines)
+            
+            # Context string used for retrieval (Breadcrumb)
+            breadcrumb = f"{art_header}"
+            if c_header:
+                breadcrumb += f" {c_header}"
+            
+            # Chunk 1: The Clause Itself (or Intro if points exist)
+            if point_intro_lines:
+                text_content = "\n".join(point_intro_lines)
+                final_text = f"{breadcrumb}\n{text_content}"
+                
+                chunks.append({
+                    "doc_id": doc_filename,
+                    "chapter": chapter,
+                    "chapter_title": chapter_title,
+                    "article": art_header,
+                    "article_num": art_num,
+                    "clause_num": c_num,
+                    "point_id": None,
+                    "text": final_text
+                })
 
+            # Chunk 2..N: Points
+            for p_char, p_lines in points:
+                p_text = "\n".join(p_lines)
+                # Recurse breadcrumb
+                # "Điều 1. ... Khoản 1. ... Điểm a) ..."
+                full_p_text = f"{breadcrumb} Điểm {p_char})\n{p_text}"
+                
+                chunks.append({
+                    "doc_id": doc_filename,
+                    "chapter": chapter,
+                    "chapter_title": chapter_title,
+                    "article": art_header,
+                    "article_num": art_num,
+                    "clause_num": c_num,
+                    "point_id": p_char,
+                    "text": full_p_text
+                })
+        
+        # Scan lines in Article
+        for line in art_lines:
+            match_c = CLAUSE_RE.match(line)
+            if match_c:
+                # Flush previous
+                flush_clause(current_clause_num, current_clause_header, current_clause_lines)
+                
+                # New clause
+                current_clause_header = f"Khoản {match_c.group(1)}"
+                current_clause_lines = [line]
+                current_clause_num = int(match_c.group(1))
+            else:
+                current_clause_lines.append(line)
+        
+        # Flush last clause
+        flush_clause(current_clause_num, current_clause_header, current_clause_lines)
+
+
+    # MAIN LOOP
     for line in lines:
         line = line.strip()
-        if not line:
-            continue
+        if not line: continue
+        
+        # 1. Check Appendix
+        match_appendix = APPENDIX_RE.match(line)
+        if match_appendix:
+            # Switch to Appendix mode
+            # Flush pending Article
+            if current_article:
+                flush_article_buffer(current_article, current_article_lines, current_chapter, current_chapter_title)
+                current_article = None
+                current_article_lines = []
             
-        # Check for Chapter (Chương)
+            current_appendix = line # "Phụ lục I"
+            chunks.append({
+                "doc_id": doc_filename,
+                "chapter": "",
+                "chapter_title": "",
+                "article": current_appendix, # Mapping Appendix to 'Article' field for search compat
+                "article_num": 0,
+                "text": line # We define Appendix as a single chunk? Or lines?
+                # Probably need to buffer appendix content too.
+                # For now, let's treat Appendix header as a start.
+            })
+            continue
+
+        if current_appendix:
+            # In appendix mode, we just verify if we hit typical headers?
+            # Or just append to the last chunk (simple approach for Apdx)
+            chunks[-1]["text"] += f"\n{line}"
+            continue
+
+        # 2. Check Chapter
         if line.lower().startswith("chương "):
-            # If we were building an article, flush it
-            flush_buffer()
-            current_text_buffer = []
-            current_meta["article"] = ""
+            if current_article:
+                flush_article_buffer(current_article, current_article_lines, current_chapter, current_chapter_title)
+                current_article = None
+                current_article_lines = []
             
-            # Parse chapter
-            # e.g. "Chương I. NHỮNG QUY ĐỊNH CHUNG"
             parts = line.split('.', 1)
-            current_meta["chapter"] = parts[0].strip()
-            current_meta["chapter_title"] = parts[1].strip() if len(parts) > 1 else ""
+            current_chapter = parts[0].strip()
+            current_chapter_title = parts[1].strip() if len(parts) > 1 else ""
             continue
-            
-        # Check for Article (Điều)
+
+        # 3. Check Article
         match_art = ARTICLE_RE.match(line)
         if match_art:
-            # Flush previous article
-            flush_buffer()
-            current_text_buffer = []
+            if current_article:
+                flush_article_buffer(current_article, current_article_lines, current_chapter, current_chapter_title)
             
-            # Start new article
-            current_meta["article"] = f"Điều {match_art.group(1)}"
-            current_text_buffer.append(line)
+            current_article = line
+            current_article_lines = [line]
         else:
-            # Just content line
-            if current_meta["article"]:
-                current_text_buffer.append(line)
+            if current_article:
+                current_article_lines.append(line)
             else:
-                # Content before any Article (Preamble / Căn cứ pháp lý)
-                # We can ignore or attach to a "Preamble" chunk
+                # Preamble text? Ignored or added to a preamble chunk?
                 pass
-
-    # Flush last one
-    flush_buffer()
+                
+    # Final flush
+    if current_article:
+        flush_article_buffer(current_article, current_article_lines, current_chapter, current_chapter_title)
     
     return chunks
 
